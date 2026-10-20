@@ -289,16 +289,17 @@ class StarFieldScene:
             if ey <= sy0 or ex <= sx0:
                 continue
             img[ys0 + sy0: ys0 + ey, xs0 + sx0: xs0 + ex] += stamp[sy0:ey, sx0:ex, None] * col
+        if getattr(self, "_grid", None) is None or self._grid[0].shape != (H, W):
+            self._grid = np.mgrid[0:H, 0:W].astype(np.float32)
+        yy, xx = self._grid
         if self.galaxy:
-            yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
             gxc, gyc = W / 2 + dx, H / 2 + dy
             rx = (xx - gxc) * math.cos(ang + 0.6) + (yy - gyc) * math.sin(ang + 0.6)
             ry = -(xx - gxc) * math.sin(ang + 0.6) + (yy - gyc) * math.cos(ang + 0.6)
             rr = np.sqrt((rx / (W * 0.12)) ** 2 + (ry / (W * 0.045)) ** 2)
             gal = 0.06 * np.exp(-rr * 3.0) * (exposure_s / 10.0) * (1 - clouds)
             img += gal[..., None] * np.array([1.0, 0.92, 0.8], np.float32)
-        # Sky glow with a gradient (light pollution) and vignetting
-        yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+        # Sky glow with a gradient (light pollution)
         grad = 0.04 + 0.02 * (xx / W) + 0.01 * (yy / H)
         img += (grad * (exposure_s / 10.0) + 0.15 * clouds)[..., None] * np.array([0.9, 1.0, 1.1], np.float32)
         if trail:
@@ -414,7 +415,7 @@ def write_dso_session(folder, n_lights: int = 12, size=(540, 720), exposure: flo
 
 def render_sky(ra: float, dec: float, scale_arcsec: float, rotation_deg: float, width: int, height: int,
                fwhm: float = 2.5, flipped: bool = False, sky: float = 0.03, noise: float = 0.002,
-               seed: int = 0, color: bool = False) -> tuple[np.ndarray, dict]:
+               seed: int = 0, color: bool = False, mag9_peak: float = 0.04) -> tuple[np.ndarray, dict]:
     """Render the real sky (bundled star catalogue, to mag 9) as the camera would see it.
 
     Returns (image, WCS header). Used to test plate solving and by the simulated camera.
@@ -432,8 +433,8 @@ def render_sky(ra: float, dec: float, scale_arcsec: float, rotation_deg: float, 
     sig = fwhm / 2.3548
     rad = int(math.ceil(sig * 5))
     k = np.arange(-rad, rad + 1, dtype=np.float32)
-    # A magnitude-9 star peaks at ~20x the noise; brighter stars saturate as in real frames.
-    flux_all = 10 ** (-0.4 * (st["mag"][sel] - 9.0)) * (20 * noise) * 2 * math.pi * (fwhm / 2.3548) ** 2
+    # A magnitude-9 star peaks at ``mag9_peak``; brighter stars saturate as in real frames.
+    flux_all = 10 ** (-0.4 * (st["mag"][sel] - 9.0)) * mag9_peak * 2 * math.pi * (fwhm / 2.3548) ** 2
     bv = st["bv"][sel]
     for xi, yi, f, b in zip(x, y, flux_all, bv):
         if not (-rad <= xi < width + rad and -rad <= yi < height + rad):
@@ -454,6 +455,7 @@ def render_sky(ra: float, dec: float, scale_arcsec: float, rotation_deg: float, 
             img[ys0 + sy0: ys0 + ey, xs0 + sx0: xs0 + ex] += patch[..., None] * col
         else:
             img[ys0 + sy0: ys0 + ey, xs0 + sx0: xs0 + ex] += patch
-    rng = np.random.default_rng(seed)
-    img = img + rng.normal(0, noise, img.shape).astype(np.float32)
+    if noise > 0:
+        rng = np.random.default_rng(seed)
+        img = img + rng.normal(0, noise, img.shape).astype(np.float32)
     return np.clip(img, 0, 1), hdr

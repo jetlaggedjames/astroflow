@@ -56,7 +56,14 @@ class LiveStacker:
             img = debayer(img, self.bayer, "bilinear")
         img = img.astype(np.float32)
         lum = img.mean(axis=2) if img.ndim == 3 else img
-        stars = detect_stars(lum, sigma=5.0, max_stars=300)
+        if lum.shape[1] > 2000:
+            # Big frames: find stars on a half-size copy (4x faster), then scale positions back.
+            import cv2
+            small = cv2.resize(lum, (lum.shape[1] // 2, lum.shape[0] // 2), interpolation=cv2.INTER_AREA)
+            stars = detect_stars(small, sigma=5.0, max_stars=300)
+            stars.x, stars.y, stars.fwhm = stars.x * 2 + 0.5, stars.y * 2 + 0.5, stars.fwhm * 2
+        else:
+            stars = detect_stars(lum, sigma=5.0, max_stars=300)
         summ = measure_summary(stars)
         with self._lock:
             if len(stars) < self.min_stars:
