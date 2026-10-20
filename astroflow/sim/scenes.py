@@ -410,3 +410,50 @@ def write_dso_session(folder, n_lights: int = 12, size=(540, 720), exposure: flo
         write_fits(p, readout(zero, 0.0, add_hot=False), {**base, "IMAGETYP": "Bias", "EXPTIME": 0.0}, bits=16)
         paths["bias"].append(p)
     return {"paths": paths, "scene": scene}
+
+
+def render_sky(ra: float, dec: float, scale_arcsec: float, rotation_deg: float, width: int, height: int,
+               fwhm: float = 2.5, flipped: bool = False, sky: float = 0.03, noise: float = 0.002,
+               seed: int = 0, color: bool = False) -> tuple[np.ndarray, dict]:
+    """Render the real sky (bundled star catalogue, to mag 9) as the camera would see it.
+
+    Returns (image, WCS header). Used to test plate solving and by the simulated camera.
+    """
+    from ..astro.catalog import star_table
+    from ..astro.coords import angular_separation
+    from ..solve.wcs import Solution, tan_header
+    hdr = tan_header(ra, dec, scale_arcsec, rotation_deg, width, height, flipped)
+    sol = Solution.from_header(hdr, width, height)
+    st = star_table()
+    radius = 0.75 * math.hypot(width, height) * scale_arcsec / 3600
+    sel = np.nonzero(angular_separation(ra, dec, st["ra"], st["dec"]) < radius)[0]
+    x, y = sol.world2pix(st["ra"][sel], st["dec"][sel])
+    img = np.full((height, width, 3) if color else (height, width), sky, np.float32)
+    sig = fwhm / 2.3548
+    rad = int(math.ceil(sig * 5))
+    k = np.arange(-rad, rad + 1, dtype=np.float32)
+    # A magnitude-9 star peaks at ~20x the noise; brighter stars saturate as in real frames.
+    flux_all = 10 ** (-0.4 * (st["mag"][sel] - 9.0)) * (20 * noise) * 2 * math.pi * (fwhm / 2.3548) ** 2
+    bv = st["bv"][sel]
+    for xi, yi, f, b in zip(x, y, flux_all, bv):
+        if not (-rad <= xi < width + rad and -rad <= yi < height + rad):
+            continue
+        x0, y0 = int(math.floor(xi)), int(math.floor(yi))
+        gx = np.exp(-((k + x0 - xi) ** 2) / (2 * sig * sig))
+        gy = np.exp(-((k + y0 - yi) ** 2) / (2 * sig * sig))
+        stamp = np.outer(gy, gx) * (f / (2 * math.pi * sig * sig))
+        ys0, xs0 = y0 - rad, x0 - rad
+        sy0, sx0 = max(0, -ys0), max(0, -xs0)
+        ey, ex = min(stamp.shape[0], height - ys0), min(stamp.shape[1], width - xs0)
+        if ey <= sy0 or ex <= sx0:
+            continue
+        patch = stamp[sy0:ey, sx0:ex]
+        if color:
+            t = float(np.clip(b, -0.3, 2.0))
+            col = np.array([0.8 + 0.25 * t, 0.95, 1.15 - 0.3 * t], np.float32)
+            img[ys0 + sy0: ys0 + ey, xs0 + sx0: xs0 + ex] += patch[..., None] * col
+        else:
+            img[ys0 + sy0: ys0 + ey, xs0 + sx0: xs0 + ex] += patch
+    rng = np.random.default_rng(seed)
+    img = img + rng.normal(0, noise, img.shape).astype(np.float32)
+    return np.clip(img, 0, 1), hdr
