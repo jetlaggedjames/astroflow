@@ -1,0 +1,6 @@
+# For running the automated tests:  python -m pytest
+-r requirements.txt
+pytest>=8
+httpx>=0.27
+# Optional: browser screenshots of every screen (tools in the test notes)
+playwright>=1.44

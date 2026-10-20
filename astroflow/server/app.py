@@ -25,7 +25,7 @@ LOGIN_PAGE = """<!doctype html><html><head><meta charset="utf-8"><meta name="vie
 align-items:center;justify-content:center;height:100vh;margin:0}form{background:#161b22;padding:32px;border-radius:12px;max-width:360px}
 input,button{font-size:20px;padding:10px;border-radius:8px;border:1px solid #444;width:100%;box-sizing:border-box;margin-top:12px}
 button{background:#2f81f7;color:#fff;border:0}p{color:#aaa}</style></head><body><form onsubmit="go(event)">
-<h2>AstroFlow</h2><p>Enter the access code shown in AstroFlow on the main computer (Settings &rarr; Network).</p>
+<h2>AstroFlow</h2><p>Enter the access code shown in AstroFlow on the main computer (Settings &rarr; Second computer).</p>
 <input id=c inputmode=numeric autocomplete=one-time-code placeholder="Access code"><button>Open AstroFlow</button><p id=m></p></form>
 <script>async function go(e){e.preventDefault();const r=await fetch('/api/auth',{method:'POST',headers:{'Content-Type':'application/json'},
 body:JSON.stringify({code:document.getElementById('c').value})});if(r.ok)location.reload();else document.getElementById('m').textContent='Wrong code.'}</script>
@@ -78,6 +78,11 @@ def create_app() -> FastAPI:
                 _cities()
             except Exception as e:
                 log.warning("Catalogue warm-up failed: %s", e)
+            try:
+                from ..hardware.capture import recover_interrupted_recordings
+                recover_interrupted_recordings()
+            except Exception as e:
+                log.warning("Checking for interrupted recordings failed: %s", e)
         threading.Thread(target=load, name="warm-up", daemon=True).start()
 
     @app.on_event("shutdown")

@@ -253,3 +253,25 @@ def test_plate_solve_and_center_with_simulators():
         assert res["steps"][0]["error_arcmin"] > 30 and res["steps"][-1]["error_arcmin"] <= 2.0
     finally:
         c.disconnect()
+
+
+def test_interrupted_recording_is_recovered_at_startup(tmp_path):
+    """A SER cut off mid-recording (no proper close) is finished automatically on the next start."""
+    import numpy as np
+    from astroflow.hardware.capture import recover_interrupted_recordings
+    from astroflow.io.ser import SerReader, SerWriter
+    p = tmp_path / "night" / "Jupiter" / "Jupiter_220000.ser"
+    w = SerWriter(p, 64, 48, 8, "RGGB")
+    for i in range(25):
+        w.write(np.full((48, 64), i, np.uint8))
+    w.sync()
+    w._f.write(b"\x07" * 100)          # half-written frame, then the "power cut": never closed properly
+    w._f.close()
+    w._ts.close()
+    res = recover_interrupted_recordings(tmp_path)
+    assert len(res) == 1 and res[0]["frames"] == 25
+    r = SerReader(p)
+    assert r.frame_count == 25 and not r.truncated and r.read_frame(24)[0, 0] == 24
+    assert r.frame_time(0) is not None
+    assert not (tmp_path / "night" / "Jupiter" / "Jupiter_220000.ser.ts").exists()
+    assert recover_interrupted_recordings(tmp_path) == []      # nothing left to do the second time

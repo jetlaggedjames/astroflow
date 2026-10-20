@@ -422,7 +422,8 @@ class SynScanMotorMount(Mount):
                 with self._lock:
                     self._status.error = str(e)
                     if self.proto and self.proto.failures >= 3:
-                        self._status.message = "Lost contact with the mount. Check the WiFi connection."
+                        self._status.message = ("Lost contact with the mount. Check the WiFi/cable connection. "
+                                                "If it was moving, stop it with the hand controller or its power switch.")
             except Exception as e:  # never let the monitor die
                 log.exception("mount monitor: %s", e)
             self._stop.wait(0.5)

@@ -1,0 +1,7 @@
+# Optional extras. AstroFlow works without them.
+# GPU acceleration on NVIDIA cards (about 1 GB; Settings > Graphics card can install it for you):
+cupy-cuda12x>=13
+# Native desktop window instead of the Edge/Chrome app window:
+pywebview>=5
+# Reading XISF files saved with LZ4 compression:
+lz4>=4

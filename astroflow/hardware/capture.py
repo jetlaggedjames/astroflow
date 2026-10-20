@@ -787,3 +787,35 @@ class CaptureManager:
 
 
 capture = CaptureManager()
+
+
+def recover_interrupted_recordings(folder: Path | None = None) -> list[dict]:
+    """Finish SER videos whose recording was cut off (crash, power cut): they still have their ".ts" side file.
+
+    Called once at start-up. Complete frames are kept, a partial last frame is dropped, the frame count and
+    time stamps are written, and a copy of the original header is kept next to the file.
+    """
+    from ..io.ser import repair
+    folder = Path(folder or settings().folder("captures"))
+    out = []
+    if not folder.exists():
+        return out
+    for ts in folder.rglob("*.ser.ts"):
+        ser = ts.with_name(ts.name[:-3])
+        if not ser.exists() or (capture.recorder is not None and str(ser) == capture.rec_info.get("path")):
+            continue
+        try:
+            r = repair(ser)
+        except Exception as e:
+            log.error("Could not recover %s: %s", ser, e)
+            continue
+        if r.get("repaired"):
+            log.warning("Recovered interrupted recording %s: %s", ser, r["message"])
+            capture.warnings.append(f"Recovered an interrupted recording: {ser.name} ({r['frames']} frames kept).")
+            out.append({"path": str(ser), **r})
+            try:
+                from ..library.index import library
+                library().add_paths([str(ser)])
+            except Exception:
+                pass
+    return out

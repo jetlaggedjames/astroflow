@@ -1,0 +1,19 @@
+# AstroFlow - Python packages it needs (all open source, see THIRD_PARTY.md).
+# Installed automatically by "Install AstroFlow.bat"; developers: pip install -r requirements.txt
+numpy>=1.26
+scipy>=1.11
+opencv-python-headless>=4.9
+astropy>=6.0
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+pillow>=10.2
+tifffile>=2024.1.30
+imagecodecs>=2024.1.1
+psutil>=5.9
+timezonefinder>=6.4
+tzdata>=2024.1
+Send2Trash>=1.8
+pyserial>=3.5
+rawpy>=0.19
+pywin32>=306; sys_platform == "win32"

@@ -79,6 +79,12 @@ def open_window(url: str, mode: str) -> subprocess.Popen | None:
 
 
 def main() -> None:
+    # Started by the desktop shortcut (pythonw.exe) there is no console: send stray output nowhere.
+    # (Everything important goes to the log file in the AstroFlow settings folder.)
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w")
     ap = argparse.ArgumentParser(description="AstroFlow")
     ap.add_argument("--port", type=int, default=0)
     ap.add_argument("--lan", action="store_true", help="allow other computers on the local network")

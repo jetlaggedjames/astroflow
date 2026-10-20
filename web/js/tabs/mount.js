@@ -119,7 +119,8 @@ function paint() {
     h("span", { class: "chip " + (st.alignment_points ? "ok" : "warn"), "data-tip": "Each Sync on a known star/object improves GoTo accuracy. 2-3 syncs spread across the sky work best." },
       `${st.alignment_points || 0} alignment point(s)`)),
   st.target ? h("div", { class: "tiny" }, `Target: ${st.target.label || ""}`) : "",
-  st.error ? h("div", { class: "dangerbox tiny" }, st.error) : "", st.message ? h("div", { class: "tiny" }, st.message) : "",
+  st.error ? h("div", { class: "dangerbox tiny" }, st.error) : "",
+  st.message ? h("div", { class: /lost contact/i.test(st.message) ? "dangerbox" : "tiny" }, st.message) : "",
   ...(st.warnings || []).map((w) => h("div", { class: "warnbox tiny" }, w)),
   h("div", { class: "tiny" }, `Altitude limit ${fmtNum(st.alt_limit, 0)}° (Settings > Mount)`));
   paintLog();
