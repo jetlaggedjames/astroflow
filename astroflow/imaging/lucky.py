@@ -56,7 +56,8 @@ class LuckyParams:
     planet: str = "jupiter"
     pole_angle_deg: float = 0.0      # position angle of the planet's north pole in the image
     rotation_dir: int = 1            # +1: features move toward +x when north is up
-    reference_frames: int = 0        # 0 = automatic (~5% of kept, 5..50)
+    reference_frames: int = 0        # 0 = automatic (~10% of kept, 10..60)
+    reference_iterations: int = 1    # local refinement rounds (more rounds start to amplify noise)
     max_shift: float = 0.0           # max local AP shift accepted (0 = AP size / 4)
     threads: int = 0
     memory_budget: int = 2 * 1024**3
@@ -109,7 +110,7 @@ class Derotator:
     """Moves surface features of a rotating planet back to where they were at t_ref."""
 
     def __init__(self, shape: tuple[int, int], center: tuple[float, float], radius: float, planet: str,
-                 pole_angle_deg: float, direction: int):
+                 pole_angle_deg: float, direction: int, limb_darkening: float = 0.45):
         h, w = shape
         self.shape = shape
         self.cx, self.cy = center
@@ -128,6 +129,9 @@ class Derotator:
         self.lat_cos = np.sqrt(np.clip(1 - v * v, 1e-6, 1))
         self.lon = np.arctan2(u, z)
         self.u = u
+        self.v = v
+        self.z = z
+        self.k = limb_darkening
         # Fade the correction out at the limb where features run off the disk.
         self.fade = np.clip((0.995 - r2) / 0.05, 0, 1).astype(np.float32)
 
@@ -138,11 +142,117 @@ class Derotator:
         du = (u2 - self.u) * self.R * self.inside * self.fade
         return (du * self.e[0]).astype(np.float32), (du * self.e[1]).astype(np.float32)
 
+    def gain(self, dt_s: float) -> np.ndarray:
+        """Brightness correction for limb darkening: a feature moved from the limb toward the
+        centre (or back) looks brighter (or darker) at its new position."""
+        if self.k <= 0:
+            return np.ones(self.shape, np.float32)
+        lon2 = np.clip(self.lon + self.omega * dt_s, -math.pi / 2, math.pi / 2)
+        z2 = self.lat_cos * np.cos(lon2)
+        g = np.where(self.inside, (np.maximum(self.z, 1e-3) / np.maximum(z2, 1e-3)) ** self.k, 1.0)
+        g = 1.0 + (np.clip(g, 0.5, 2.0) - 1.0) * self.fade
+        return g.astype(np.float32)
+
+
+# -------------------------------------------------------- alignment points ---
+
+class APModel:
+    """A grid of alignment points over the reference image."""
+
+    def __init__(self, ref_gray: np.ndarray, mask: np.ndarray, ap: int, p: "LuckyParams", enabled: bool = True):
+        self.ap = ap
+        self.max_shift = p.max_shift or max(3.0, ap / 4)
+        self.margin = int(math.ceil(self.max_shift)) + 1
+        if enabled:
+            self.aps, self.grid_shape, self.origin, self.spacing = _place_aps(ref_gray, mask, ap, p, self.margin)
+        else:
+            self.aps, self.grid_shape, self.origin, self.spacing = [], (0, 0), (0, 0), ap
+        self.rows = np.array([(y - self.origin[0]) // self.spacing for _, y in self.aps], int)
+        self.cols = np.array([(x - self.origin[1]) // self.spacing for x, _ in self.aps], int)
+        self.set_reference(ref_gray)
+
+    def __len__(self) -> int:
+        return len(self.aps)
+
+    def set_reference(self, ref_gray: np.ndarray) -> None:
+        ap = self.ap
+        blur = cv2.GaussianBlur(ref_gray, (0, 0), 1.0)
+        self.patches = [blur[y - ap // 2: y - ap // 2 + ap, x - ap // 2: x - ap // 2 + ap].copy() for x, y in self.aps]
+        # Which directions each AP can measure (structure tensor). Along a direction
+        # without detail (e.g. along Jupiter's belts) a measured shift is just noise.
+        self.proj = np.zeros((len(self.aps), 2, 2), np.float32)
+        for a, patch in enumerate(self.patches):
+            gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0)
+            gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1)
+            J = np.array([[np.sum(gx * gx), np.sum(gx * gy)], [np.sum(gx * gy), np.sum(gy * gy)]], np.float64)
+            evals, evecs = np.linalg.eigh(J)
+            ratio = evals[0] / max(evals[1], 1e-30)
+            trust_weak = float(np.clip((ratio - 0.04) / 0.2, 0, 1))
+            v_weak, v_strong = evecs[:, 0], evecs[:, 1]
+            self.proj[a] = np.outer(v_strong, v_strong) + trust_weak * np.outer(v_weak, v_weak)
+
+    def measure(self, aligned_gray: np.ndarray):
+        """Local shift (n,2), validity (n,) and sharpness (n,) of every AP in a globally aligned frame."""
+        n, ap, m = len(self.aps), self.ap, self.margin
+        shift = np.zeros((n, 2), np.float32)
+        valid = np.zeros(n, bool)
+        qual = np.zeros(n, np.float32)
+        if n == 0:
+            return shift, valid, qual
+        b = cv2.GaussianBlur(aligned_gray, (0, 0), 1.0)
+        for a, (x, y) in enumerate(self.aps):
+            y0, x0 = y - ap // 2, x - ap // 2
+            search = b[y0 - m: y0 + ap + m, x0 - m: x0 + ap + m]
+            dx, dy, conf = template_shift(self.patches[a], search, m)
+            ok = conf > 0.3 and abs(dx) <= self.max_shift and abs(dy) <= self.max_shift
+            valid[a] = ok
+            if ok:
+                shift[a] = self.proj[a] @ np.array([dx, dy], np.float32)
+            patch = b[y0: y0 + ap, x0: x0 + ap]
+            mu = float(patch.mean()) + 1e-6
+            qual[a] = float(cv2.Laplacian(patch, cv2.CV_32F).var()) / (mu * mu)
+        _clean_ap_field(shift, valid, self.rows, self.cols, self.grid_shape)
+        return shift, valid, qual
+
+    def output_grid(self, xr: np.ndarray, yr: np.ndarray) -> "APGrid":
+        return APGrid(self, xr, yr)
+
+
+class APGrid:
+    """Turns per-AP values into smooth full-resolution maps on an output grid."""
+
+    def __init__(self, model: APModel, xr: np.ndarray, yr: np.ndarray):
+        self.m = model
+        if len(model):
+            gy0, gx0 = model.origin
+            self.gmx = ((xr - gx0) / model.spacing).astype(np.float32)
+            self.gmy = ((yr - gy0) / model.spacing).astype(np.float32)
+            cover = np.zeros(model.grid_shape, np.float32)
+            cover[model.rows, model.cols] = 1.0
+            self.coverage = np.clip(self._up(cover), 0, 1)
+        else:
+            self.coverage = np.zeros(xr.shape, np.float32)
+
+    def _up(self, g: np.ndarray) -> np.ndarray:
+        return cv2.remap(g, self.gmx, self.gmy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+    def dense(self, values: np.ndarray, fill: float = 0.0) -> np.ndarray:
+        g = np.full(self.m.grid_shape, fill, np.float32)
+        g[self.m.rows, self.m.cols] = values
+        return self._up(g)
+
 
 # --------------------------------------------------------------- main ---
 
 def stack(src: FrameSource, frames: list[int], params: LuckyParams | dict | None = None,
-          progress: Callable[[float, str], None] | None = None) -> LuckyResult:
+          progress: Callable[[float, str], None] | None = None,
+          reference_image: np.ndarray | None = None, debug: dict | None = None) -> LuckyResult:
+    """Stack ``frames`` (indices, best first) of ``src``.
+
+    ``reference_image`` (optional) replaces the automatically built reference,
+    e.g. a previous stack of the same target. ``debug`` (optional dict) receives
+    internal arrays for testing.
+    """
     p = params if isinstance(params, LuckyParams) else LuckyParams.from_dict(params)
     if not frames:
         raise ValueError("No frames selected for stacking")
@@ -152,13 +262,11 @@ def stack(src: FrameSource, frames: list[int], params: LuckyParams | dict | None
     t0 = time.time()
     H, W = src.height, src.width
     color = src.is_color
-
-    def load(i: int) -> np.ndarray:
-        return src.get_float(i, p.debayer_method)
+    nF = len(frames)
 
     # Cache decoded frames in RAM when they fit the memory budget (saves a second read).
     frame_bytes = H * W * (3 if color else 1) * 4
-    cache_ok = frame_bytes * len(frames) < p.memory_budget * 0.6
+    cache_ok = frame_bytes * nF < p.memory_budget * 0.6
     cache: dict[int, np.ndarray] = {}
     cache_lock = threading.Lock()
 
@@ -167,94 +275,90 @@ def stack(src: FrameSource, frames: list[int], params: LuckyParams | dict | None
             with cache_lock:
                 if i in cache:
                     return cache[i]
-        img = load(i)
+        img = src.get_float(i, p.debayer_method)
         if cache_ok:
             with cache_lock:
                 cache[i] = img
         return img
 
-    # ---- 1. reference frame ------------------------------------------------
+    # ---- 1. global alignment helpers ---------------------------------------
     prog(0.01, "Building the reference image from the sharpest frames")
-    best = get(frames[0])
-    best_gray = _gray(best).astype(np.float32)
+    best_gray = _gray(get(frames[0])).astype(np.float32)
     bcx, bcy, bmask = _centroid(best_gray)
     disk = (np.count_nonzero(bmask) / bmask.size < 0.6) and not _touches_edge(bmask)
     mode = p.align_mode if p.align_mode != "auto" else ("disk" if disk else "surface")
     win = cv2.createHanningWindow((W, H), cv2.CV_32F)
 
-    def global_shift(gray: np.ndarray, ref_gray: np.ndarray, ref_c: tuple[float, float]) -> tuple[float, float]:
+    def global_shift(gray: np.ndarray, ref_g: np.ndarray, ref_c: tuple[float, float]) -> tuple[float, float]:
         if mode == "disk":
             cx, cy, _ = _centroid(gray)
             dx0, dy0 = cx - ref_c[0], cy - ref_c[1]
-            moved = _shift_image(gray, dx0, dy0)
-            ddx, ddy, _ = _phase(ref_gray, moved, win)
+            ddx, ddy, _ = _phase(ref_g, _shift_image(gray, dx0, dy0), win)
             return dx0 + ddx, dy0 + ddy
-        dx, dy, _ = _phase(ref_gray, gray, win)
+        dx, dy, _ = _phase(ref_g, gray, win)
         return dx, dy
 
-    nref = p.reference_frames or int(np.clip(len(frames) * 0.05, 5, 50))
-    nref = min(nref, len(frames))
-    ref_acc = np.zeros_like(best, dtype=np.float64)
-    for k, i in enumerate(frames[:nref]):
-        img = get(i)
-        dx, dy = global_shift(_gray(img).astype(np.float32), best_gray, (bcx, bcy))
-        ref_acc += _shift_image(img, dx, dy)
-        prog(0.01 + 0.04 * (k + 1) / nref)
-    reference = (ref_acc / nref).astype(np.float32)
+    # ---- 2. reference: global mean of the best frames, then refined locally --
+    nref = min(p.reference_frames or int(np.clip(nF * 0.1, 10, 60)), nF)
+    ref_frames = [get(i) for i in frames[:nref]]
+    ref_shifts = [global_shift(_gray(im).astype(np.float32), best_gray, (bcx, bcy)) for im in ref_frames]
+    reference = np.mean([_shift_image(im, dx, dy) for im, (dx, dy) in zip(ref_frames, ref_shifts)], axis=0).astype(np.float32)
     ref_gray = _gray(reference).astype(np.float32)
     rcx, rcy, rmask = _centroid(ref_gray)
+    ap = p.ap_size or _auto_ap_size(rmask, mode, (H, W))
+    model = APModel(ref_gray, rmask, ap, p, enabled=p.multipoint)
+    if reference_image is not None and reference_image.shape[:2] == (H, W):
+        ri = reference_image.astype(np.float32)
+        reference = ri if ri.ndim == reference.ndim else (ri.mean(axis=2) if ri.ndim == 3 else np.repeat(ri[..., None], 3, axis=2))
+        ref_gray = _gray(reference).astype(np.float32)
+        model.set_reference(ref_gray)
+    elif len(model) and nref >= 3:
+        # Local refinement: un-warp each reference frame with its own AP shifts, re-average.
+        yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+        grid = model.output_grid(xx, yy)
+        rounds = max(1, p.reference_iterations)
+        for it in range(rounds):
+            acc = np.zeros_like(reference)
+            for k, im in enumerate(ref_frames):
+                gray = _gray(im).astype(np.float32)
+                dx, dy = global_shift(gray, ref_gray, (rcx, rcy))
+                sh, ok, _ = model.measure(_shift_image(gray, dx, dy))
+                mx = (xx + dx + grid.dense(sh[:, 0] * ok) * grid.coverage).astype(np.float32)
+                my = (yy + dy + grid.dense(sh[:, 1] * ok) * grid.coverage).astype(np.float32)
+                acc += cv2.remap(im, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+                prog(0.02 + 0.04 * (it * nref + k + 1) / (rounds * nref))
+            reference = (acc / nref).astype(np.float32)
+            ref_gray = _gray(reference).astype(np.float32)
+            model.set_reference(ref_gray)
+            rcx, rcy, rmask = _centroid(ref_gray)
+    del ref_frames
 
-    # Frame times (for de-rotation)
+    # ---- 3. frame times for de-rotation -----------------------------------
     derot = None
     times = None
     if p.derotate:
-        ts = []
-        for i in frames:
-            t = src.frame_time(i)
-            ts.append(t.timestamp() if t else float("nan"))
-        times = np.array(ts)
+        ts = [src.frame_time(i) for i in frames]
+        times = np.array([t.timestamp() if t else float("nan") for t in ts])
         if np.all(np.isfinite(times)) and mode == "disk":
-            t_ref = float(np.median(times))
-            radius = _disk_radius(rmask)
-            derot = Derotator((H, W), (rcx, rcy), radius, p.planet, p.pole_angle_deg, p.rotation_dir)
-            times = times - t_ref
+            times = times - float(np.median(times))
+            derot = Derotator((H, W), (rcx, rcy), _disk_radius(rmask), p.planet, p.pole_angle_deg, p.rotation_dir)
         else:
             log.warning("De-rotation skipped: frames have no time stamps or the planet disk was not found")
 
-    # ---- 2. alignment points ----------------------------------------------
-    ap = p.ap_size or _auto_ap_size(rmask, mode, (H, W))
-    margin0 = int(math.ceil(p.max_shift or max(3.0, ap / 4))) + 1
-    aps, grid_shape, grid_origin, spacing = _place_aps(ref_gray, rmask, ap, p, margin0) if p.multipoint else ([], (0, 0), (0, 0), ap)
-    max_shift = p.max_shift or max(3.0, ap / 4)
-    margin = int(math.ceil(max_shift)) + 1
-    ref_blur = cv2.GaussianBlur(ref_gray, (0, 0), 1.0)
-    ref_patches = [ref_blur[y - ap // 2: y - ap // 2 + ap, x - ap // 2: x - ap // 2 + ap].copy() for x, y in aps]
-    # Which directions each AP can measure (structure tensor). Along a direction
-    # without detail (e.g. along Jupiter's belts) a measured shift is just noise.
-    ap_proj = np.zeros((len(aps), 2, 2), np.float32)
-    for a, patch in enumerate(ref_patches):
-        gx = cv2.Sobel(patch, cv2.CV_32F, 1, 0)
-        gy = cv2.Sobel(patch, cv2.CV_32F, 0, 1)
-        J = np.array([[np.sum(gx * gx), np.sum(gx * gy)], [np.sum(gx * gy), np.sum(gy * gy)]], np.float64)
-        evals, evecs = np.linalg.eigh(J)
-        ratio = evals[0] / max(evals[1], 1e-30)
-        trust_weak = float(np.clip((ratio - 0.04) / 0.2, 0, 1))
-        v_weak, v_strong = evecs[:, 0], evecs[:, 1]
-        ap_proj[a] = np.outer(v_strong, v_strong) + trust_weak * np.outer(v_weak, v_weak)
-    nA = len(aps)
-    nF = len(frames)
+    # ---- 4. pass 1: measure every frame ------------------------------------
+    nA = len(model)
     gshift = np.zeros((nF, 2), np.float32)
     lshift = np.zeros((nF, nA, 2), np.float32)
     lvalid = np.zeros((nF, nA), bool)
     lqual = np.zeros((nF, nA), np.float32)
     bright = np.ones(nF, np.float32)
     ref_mean = float(np.mean(ref_gray[rmask])) if np.any(rmask) else float(np.mean(ref_gray))
+    if derot is not None:
+        dgy, dgx = np.mgrid[0:H, 0:W].astype(np.float32)
     prog(0.06, f"Measuring {nA} alignment points in {nF:,} frames")
 
     def pass1(k: int) -> None:
-        i = frames[k]
-        img = get(i)
-        gray = _gray(img).astype(np.float32)
+        gray = _gray(get(frames[k])).astype(np.float32)
         dx, dy = global_shift(gray, ref_gray, (rcx, rcy))
         gshift[k] = (dx, dy)
         if p.normalize_brightness:
@@ -264,72 +368,31 @@ def stack(src: FrameSource, frames: list[int], params: LuckyParams | dict | None
             return
         if derot is not None:
             fx, fy = derot.field(float(times[k]))
-            mx = (derot_grid_x + fx + dx).astype(np.float32)
-            my = (derot_grid_y + fy + dy).astype(np.float32)
-            aligned = cv2.remap(gray, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+            aligned = cv2.remap(gray, (dgx + fx + dx).astype(np.float32), (dgy + fy + dy).astype(np.float32),
+                                cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
         else:
             aligned = _shift_image(gray, dx, dy)
-        aligned_b = cv2.GaussianBlur(aligned, (0, 0), 1.0)
-        for a, (x, y) in enumerate(aps):
-            y0, x0 = y - ap // 2, x - ap // 2
-            search = aligned_b[y0 - margin: y0 + ap + margin, x0 - margin: x0 + ap + margin]
-            ddx, ddy, conf = template_shift(ref_patches[a], search, margin)
-            ok = conf > 0.3 and abs(ddx) <= max_shift and abs(ddy) <= max_shift
-            lvalid[k, a] = ok
-            if ok:
-                lshift[k, a] = ap_proj[a] @ np.array([ddx, ddy], np.float32)
-            patch = aligned_b[y0: y0 + ap, x0: x0 + ap]
-            lap = cv2.Laplacian(patch, cv2.CV_32F)
-            mu = float(patch.mean()) + 1e-6
-            lqual[k, a] = float(lap.var()) / (mu * mu)
-        _clean_ap_field(lshift[k], lvalid[k], ap_rows_g, ap_cols_g, grid_shape)
+        lshift[k], lvalid[k], lqual[k] = model.measure(aligned)
 
-    if derot is not None:
-        derot_grid_y, derot_grid_x = np.mgrid[0:H, 0:W].astype(np.float32)
-    if nA:
-        ap_rows_g = np.array([(y - grid_origin[0]) // spacing for _, y in aps])
-        ap_cols_g = np.array([(x - grid_origin[1]) // spacing for x, _ in aps])
-    else:
-        ap_rows_g = ap_cols_g = np.zeros(0, int)
     _parallel(pass1, nF, threads, lambda d: prog(0.06 + 0.44 * d / nF, f"Aligning frames: {d:,}/{nF:,}"))
 
-    # ---- 3. local frame selection -----------------------------------------
+    # ---- 5. local frame selection -----------------------------------------
     weights = np.ones((nF, nA), np.float32)
     if nA:
         keep_n = max(1, int(round(nF * p.local_keep_percent / 100)))
         q = np.where(lvalid, lqual, -1)
         rank = np.argsort(np.argsort(-q, axis=0), axis=0)
         weights = (rank < keep_n).astype(np.float32) * lvalid
-        # Make sure every AP has at least something.
         empty = weights.sum(axis=0) == 0
         weights[:, empty] = 1.0
 
-    # Dense interpolation helpers for the AP grid
+    # ---- 6. pass 2: warp and accumulate -----------------------------------
     scale = float(p.upsample) if p.upsample and p.upsample > 1 else 1.0
     Ho, Wo = int(round(H * scale)), int(round(W * scale))
     yo, xo = np.mgrid[0:Ho, 0:Wo].astype(np.float32)
-    # Output pixel centre -> reference coordinates
-    xr = (xo + 0.5) / scale - 0.5
+    xr = (xo + 0.5) / scale - 0.5          # output pixel centre -> reference coordinates
     yr = (yo + 0.5) / scale - 0.5
-    if nA:
-        gy0, gx0 = grid_origin
-        # Maps from output pixels into the (small) AP grid, for fast bilinear upsampling.
-        gmx = ((xr - gx0) / spacing).astype(np.float32)
-        gmy = ((yr - gy0) / spacing).astype(np.float32)
-        ap_rows = np.array([(y - gy0) // spacing for _, y in aps])
-        ap_cols = np.array([(x - gx0) // spacing for x, _ in aps])
-        cover_grid = np.zeros(grid_shape, np.float32)
-        cover_grid[ap_rows, ap_cols] = 1.0
-        coverage_ap = np.clip(cv2.remap(cover_grid, gmx, gmy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE), 0, 1)
-    else:
-        coverage_ap = np.zeros((Ho, Wo), np.float32)
-
-    def dense(values: np.ndarray, fill: float = 0.0) -> np.ndarray:
-        g = np.full(grid_shape, fill, np.float32)
-        g[ap_rows, ap_cols] = values
-        return cv2.remap(g, gmx, gmy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-
-    # ---- 4. stacking (pass 2) ---------------------------------------------
+    grid = model.output_grid(xr, yr)
     ch = 3 if color else 1
     nacc = max(1, min(threads, int(p.memory_budget * 0.3 // max(1, Ho * Wo * ch * 4 * 4))))
     accs = [{"num": np.zeros((Ho, Wo, ch), np.float32), "den": np.zeros((Ho, Wo), np.float32),
@@ -337,8 +400,7 @@ def stack(src: FrameSource, frames: list[int], params: LuckyParams | dict | None
     prog(0.5, "Stacking")
 
     def pass2(k: int) -> None:
-        i = frames[k]
-        img = get(i)
+        img = get(frames[k])
         if img.ndim == 2:
             img = img[..., None]
         dx, dy = gshift[k]
@@ -351,25 +413,28 @@ def stack(src: FrameSource, frames: list[int], params: LuckyParams | dict | None
                 fy = cv2.resize(fy, (Wo, Ho), interpolation=cv2.INTER_LINEAR)
             mx = mx + fx
             my = my + fy
-        if nA:
-            sx = lshift[k, :, 0] * lvalid[k]
-            sy = lshift[k, :, 1] * lvalid[k]
-            mx = mx + dense(sx) * coverage_ap
-            my = my + dense(sy) * coverage_ap
-            wmap = dense(weights[k], 0.0) * coverage_ap + (1 - coverage_ap)
+            dgain = derot.gain(float(times[k]))
+            if scale != 1.0:
+                dgain = cv2.resize(dgain, (Wo, Ho), interpolation=cv2.INTER_LINEAR)
         else:
-            wmap = None
+            dgain = None
+        wmap = None
+        if nA:
+            mx = mx + grid.dense(lshift[k, :, 0] * lvalid[k]) * grid.coverage
+            my = my + grid.dense(lshift[k, :, 1] * lvalid[k]) * grid.coverage
+            wmap = grid.dense(weights[k], 0.0) * grid.coverage + (1 - grid.coverage)
         mx = mx.astype(np.float32)
         my = my.astype(np.float32)
-        gain = bright[k]
         if p.upsample_method == "drizzle" and scale > 1:
             warped = _drizzle_frame(img, mx, my, scale, p.drizzle_pixfrac)
         else:
-            interp = cv2.INTER_CUBIC if scale > 1 else cv2.INTER_LINEAR
-            warped = cv2.remap(img, mx, my, interp, borderMode=cv2.BORDER_REFLECT)
+            warped = cv2.remap(img, mx, my, cv2.INTER_CUBIC if scale > 1 else cv2.INTER_LINEAR,
+                               borderMode=cv2.BORDER_REFLECT)
             if warped.ndim == 2:
                 warped = warped[..., None]
-        warped *= gain
+        warped *= bright[k]
+        if dgain is not None:
+            warped *= dgain[..., None]
         acc = accs[k % nacc]
         with acc["lock"]:
             if wmap is None:
@@ -383,13 +448,16 @@ def stack(src: FrameSource, frames: list[int], params: LuckyParams | dict | None
     _parallel(pass2, nF, threads, lambda d: prog(0.5 + 0.48 * d / nF, f"Stacking: {d:,}/{nF:,} frames"))
     num = sum(a["num"] for a in accs)
     den = sum(a["den"] for a in accs)
-    gnum = sum(a["gnum"] for a in accs)
-    out = np.where(den[..., None] > 0.5, num / np.maximum(den[..., None], 1e-6), gnum / nF)
+    gmean = sum(a["gnum"] for a in accs) / nF
+    out = np.where(den[..., None] > 0.5, num / np.maximum(den[..., None], 1e-6), gmean)
     # Smooth transition where only a few frames contributed.
     blend = np.clip(den / max(1.0, nF * p.local_keep_percent / 100 * 0.25), 0, 1)[..., None]
-    out = out * blend + (gnum / nF) * (1 - blend)
+    out = out * blend + gmean * (1 - blend)
     out = out[..., 0] if not color else out
     cache.clear()
+    if debug is not None:
+        debug.update({"gshift": gshift, "lshift": lshift, "lvalid": lvalid, "lqual": lqual, "aps": model.aps,
+                      "weights": weights, "ap_size": ap})
     info = {
         "mode": mode, "aps": nA, "ap_size": ap, "frames": nF, "reference_frames": nref,
         "upsample": scale, "derotated": derot is not None, "seconds": round(time.time() - t0, 1),
@@ -397,7 +465,7 @@ def stack(src: FrameSource, frames: list[int], params: LuckyParams | dict | None
         "mean_local_shift_px": float(np.mean(np.hypot(lshift[..., 0], lshift[..., 1])[lvalid])) if nA and lvalid.any() else 0.0,
     }
     prog(1.0, f"Stacked {nF:,} frames with {nA} alignment points in {info['seconds']}s")
-    return LuckyResult(np.clip(out, 0, None).astype(np.float32), reference, den, aps, ap, nF, info)
+    return LuckyResult(np.clip(out, 0, None).astype(np.float32), reference, den, model.aps, ap, nF, info)
 
 
 def _parallel(fn, n: int, threads: int, on_progress) -> None:

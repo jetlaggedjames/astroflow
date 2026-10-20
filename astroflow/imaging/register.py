@@ -238,8 +238,8 @@ def warp(img: np.ndarray, tr: Transform, out_shape: tuple[int, int], interp: str
     h, w = out_shape
     src = img.astype(np.float32, copy=False)
     if tr.poly is None:
-        Minv = np.linalg.inv(tr.matrix)
-        out = cv2.warpPerspective(src, Minv, (w, h), flags=flags | cv2.WARP_FILL_OUTLIERS,
+        # warpPerspective inverts the matrix itself: give it the forward (moving -> reference) map.
+        out = cv2.warpPerspective(src, tr.matrix, (w, h), flags=flags,
                                   borderMode=cv2.BORDER_CONSTANT, borderValue=border_value)
     else:
         # Invert the polynomial numerically: for each reference pixel find the moving pixel.
