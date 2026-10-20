@@ -100,3 +100,53 @@ def test_open_source_filelist(tmp_path):
     assert src.count == 3 and src.bayer == "RGGB"
     assert src.get_float(1).shape == (8, 10, 3)
     assert src.frame_time(2).second == 2
+
+
+def _write_xisf(path, data, sample, compression=None, shuffle=False, keywords=None, cfa=None):
+    """Tiny XISF writer for tests (PixInsight layout: signature, header length, XML, attached block)."""
+    import struct
+    import zlib
+    planar = np.moveaxis(data, -1, 0) if data.ndim == 3 else data[None]
+    block = np.ascontiguousarray(planar).astype(planar.dtype.newbyteorder("<")).tobytes()
+    comp_attr = ""
+    if compression:
+        raw = block
+        if shuffle:
+            item = planar.dtype.itemsize
+            arr = np.frombuffer(raw, np.uint8)
+            raw = arr.reshape(-1, item).T.copy().tobytes()
+        block = zlib.compress(raw)
+        comp_attr = f' compression="zlib{"+sh" if shuffle else ""}:{len(raw)}{f":{planar.dtype.itemsize}" if shuffle else ""}"'
+    kws = "".join(f'<FITSKeyword name="{k}" value="{v}" comment=""/>' for k, v in (keywords or {}).items())
+    cfa_el = f'<ColorFilterArray pattern="{cfa}" width="2" height="2"/>' if cfa else ""
+    c = planar.shape[0]
+    h, w = planar.shape[1:]
+
+    def xml(pos):
+        return (f'<?xml version="1.0" encoding="UTF-8"?><xisf version="1.0" xmlns="http://www.pixinsight.com/xisf">'
+                f'<Image geometry="{w}:{h}:{c}" sampleFormat="{sample}" colorSpace="{"RGB" if c == 3 else "Gray"}" '
+                f'location="attachment:{pos}:{len(block)}"{comp_attr}>{kws}{cfa_el}</Image></xisf>').encode()
+    pos = 16 + len(xml(10**9)) + 64
+    head = xml(pos).ljust(pos - 16, b" ")
+    with open(path, "wb") as f:
+        f.write(b"XISF0100" + struct.pack("<I", len(head)) + b"\0" * 4 + head + block)
+
+
+def test_xisf_read_plain_compressed_and_cfa(tmp_path):
+    from astroflow.io import xisf
+    from astroflow.io.images import read_header, read_image
+    rng = np.random.default_rng(5)
+    mono = (rng.random((30, 40)) * 65535).astype(np.uint16)
+    p1 = tmp_path / "mono.xisf"
+    _write_xisf(p1, mono, "UInt16", keywords={"EXPTIME": "12.5", "OBJECT": "'M 51'"}, cfa="RGGB")
+    img, meta = xisf.read(p1)
+    assert np.array_equal(img, mono) and meta["EXPTIME"] == "12.5" and meta["OBJECT"] == "M 51" and meta["BAYERPAT"] == "RGGB"
+    rgb = rng.random((24, 32, 3)).astype(np.float32)
+    p2 = tmp_path / "rgb.xisf"
+    _write_xisf(p2, rgb, "Float32", compression="zlib", shuffle=True)
+    img2, _ = xisf.read(p2)
+    assert img2.shape == (24, 32, 3) and np.allclose(img2, rgb)
+    hdr = read_header(p2)
+    assert (hdr["_width"], hdr["_height"], hdr["_channels"]) == (32, 24, 3)
+    img3, _ = read_image(p2)            # through the general loader the app uses
+    assert img3.shape == (24, 32, 3)

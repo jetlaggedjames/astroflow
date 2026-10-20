@@ -1,6 +1,7 @@
 """Settings, background jobs, logs, folder browsing, network sharing."""
 from __future__ import annotations
 
+import hmac
 import io
 import os
 import shutil
@@ -203,7 +204,7 @@ def network(request: Request):
 
 @router.post("/auth")
 def auth(body: dict, request: Request):
-    if str(body.get("code", "")).strip() != str(settings().get("network.access_code")):
+    if not hmac.compare_digest(str(body.get("code", "")).strip(), str(settings().get("network.access_code"))):
         raise HTTPException(401, "Wrong access code")
     r = Response('{"ok": true}', media_type="application/json")
     r.set_cookie("af_access", str(settings().get("network.access_code")), httponly=True, samesite="strict", max_age=30 * 86400)

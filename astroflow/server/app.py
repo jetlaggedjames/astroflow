@@ -2,6 +2,7 @@
 on another computer on your network (when you allow it in Settings)."""
 from __future__ import annotations
 
+import hmac
 import logging
 import threading
 from pathlib import Path
@@ -43,7 +44,7 @@ def create_app() -> FastAPI:
                 return JSONResponse({"detail": "Network access is switched off on the main computer"}, status_code=403)
             code = str(settings().get("network.access_code"))
             given = request.cookies.get("af_access") or request.headers.get("X-Access-Code")
-            if given != code and request.url.path not in ("/api/auth",):
+            if not hmac.compare_digest(str(given or ""), code) and request.url.path not in ("/api/auth",):
                 if request.url.path.startswith("/api/"):
                     return JSONResponse({"detail": "Access code required"}, status_code=401)
                 return HTMLResponse(LOGIN_PAGE, status_code=401)

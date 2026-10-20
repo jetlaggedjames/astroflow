@@ -283,8 +283,10 @@ class SynScanMotorMount(Mount):
         if not self.cpr[1] or not self.cpr[2]:
             raise MountError("Mount reported invalid gear data")
         self._stop.clear()
+        self._first_status = threading.Event()
         self._mon = threading.Thread(target=self._monitor, name="mount-monitor", daemon=True)
         self._mon.start()
+        self._first_status.wait(3.0)      # so the status reported right after connecting is already current
         log.info("SynScan connected: version %s CPR %s TMR %s HSR %s", self.version, self.cpr, self.tmr, self.hsr)
 
     def disconnect(self) -> None:
@@ -412,6 +414,7 @@ class SynScanMotorMount(Mount):
                     st.capabilities = self.capabilities()
                     st.time = t.isoformat()
                     st.error = "" if not (s1.get("blocked") or s2.get("blocked")) else "A motor reports BLOCKED - check for obstructions"
+                getattr(self, "_first_status", threading.Event()).set()
                 if self._tracking and not st.slewing and not self._moving and time.time() - last_track > 1.0:
                     self._track_step()
                     last_track = time.time()
