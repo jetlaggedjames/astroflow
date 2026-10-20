@@ -307,9 +307,8 @@ class StarFieldScene:
             tr = np.zeros((H, W), np.float32)
             cv2.line(tr, p0, p1, 0.25, 2, cv2.LINE_AA)
             img += tr[..., None]
-        r2 = ((xx - W / 2) ** 2 + (yy - H / 2) ** 2) / ((W / 2) ** 2 + (H / 2) ** 2)
-        vign = (1 - 0.35 * r2)[..., None]
-        return img * vign
+        # Vignetting and dust are applied by optics(): lights and flats share the same light path.
+        return img
 
     def add_hot_pixels(self, raw: np.ndarray) -> np.ndarray:
         H, W = raw.shape[:2]
@@ -317,6 +316,13 @@ class StarFieldScene:
         for (x, y), v in zip(self.hot, self.hot_val):
             raw[y % H, x % W] = max(int(raw[y % H, x % W]), int(v * mx))
         return raw
+
+    def optics(self) -> np.ndarray:
+        """Throughput of the telescope + camera (vignetting and a dust donut), max 1."""
+        if getattr(self, "_optics", None) is None:
+            f = self.flat_field()
+            self._optics = (f / f.max()).astype(np.float32)
+        return self._optics
 
     def flat_field(self) -> np.ndarray:
         H, W = self.size
@@ -352,3 +358,55 @@ def jupiter_ser(path, n_frames: int = 300, size=(240, 320), radius: float = 70, 
             raw = sensor_readout(frame, bit_depth, gain, bayer, rng=rng)
             w.write(raw, t0 + dt.timedelta(seconds=t))
     return {"truth": scene.render(0.0), "blur": np.array(blurs), "scene": scene}
+
+
+def write_dso_session(folder, n_lights: int = 12, size=(540, 720), exposure: float = 10.0, seed: int = 3,
+                      bayer: str = "RGGB", n_darks: int = 8, n_flats: int = 8, n_bias: int = 8,
+                      trail_frame: int | None = 4, cloud_frame: int | None = None, interval_s: float = 30.0,
+                      rotation_deg_per_s: float = 0.004, target: str = "Sim Galaxy") -> dict:
+    """Write a complete simulated deep-sky session as FITS files (lights, darks, flats, bias)."""
+    import datetime as dt
+    from pathlib import Path
+    from ..io.images import write_fits
+    folder = Path(folder)
+    rng = np.random.default_rng(seed)
+    scene = StarFieldScene(size, n_stars=350, seed=seed, rotation_deg_per_s=rotation_deg_per_s)
+    H, W = size
+    dark_current = rng.gamma(1.0, 0.002, (H, W)).astype(np.float32)   # per 10 s, fixed pattern
+    bias_level = 0.02
+    t0 = dt.datetime(2026, 10, 20, 22, 0, 0, tzinfo=dt.timezone.utc)
+    base = {"INSTRUME": "AstroFlow Simulator", "TELESCOP": "Sim 300P", "GAIN": 120, "OFFSET": 20,
+            "XBINNING": 1, "CCD-TEMP": 12.0, "BAYERPAT": bayer, "FOCALLEN": 1500.0, "XPIXSZ": 2.9}
+
+    def readout(rgb, exp, add_hot=True):
+        img = rgb + 0.0
+        raw = sensor_readout(img, 12, 1.0, bayer, read_noise=0.002, rng=rng, photon_scale=20000.0).astype(np.float32) / 65535
+        raw = raw + bias_level + dark_current * (exp / 10.0)
+        if add_hot:
+            raw = scene.add_hot_pixels((np.clip(raw, 0, 1) * 65535).astype(np.uint16)).astype(np.float32) / 65535
+        return (np.clip(raw, 0, 1) * 65535).astype(np.uint16)
+
+    paths: dict[str, list] = {"lights": [], "darks": [], "flats": [], "bias": []}
+    for i in range(n_lights):
+        t = i * interval_s
+        sky = scene.render(t, exposure, clouds=0.7 if i == cloud_frame else 0.0, trail=(i == trail_frame))
+        raw = readout(sky * scene.optics(), exposure)
+        p = folder / "lights" / f"light_{i:03d}.fits"
+        write_fits(p, raw, {**base, "IMAGETYP": "Light", "EXPTIME": exposure, "OBJECT": target,
+                            "DATE-OBS": (t0 + dt.timedelta(seconds=t)).strftime("%Y-%m-%dT%H:%M:%S")}, bits=16)
+        paths["lights"].append(p)
+    zero = np.zeros((H, W, 3), np.float32)
+    for i in range(n_darks):
+        p = folder / "darks" / f"dark_{i:03d}.fits"
+        write_fits(p, readout(zero, exposure), {**base, "IMAGETYP": "Dark", "EXPTIME": exposure}, bits=16)
+        paths["darks"].append(p)
+    flat_sky = scene.optics() * 0.5   # an evenly lit panel seen through the same optics
+    for i in range(n_flats):
+        p = folder / "flats" / f"flat_{i:03d}.fits"
+        write_fits(p, readout(flat_sky, 0.01, add_hot=False), {**base, "IMAGETYP": "Flat", "EXPTIME": 0.01}, bits=16)
+        paths["flats"].append(p)
+    for i in range(n_bias):
+        p = folder / "bias" / f"bias_{i:03d}.fits"
+        write_fits(p, readout(zero, 0.0, add_hot=False), {**base, "IMAGETYP": "Bias", "EXPTIME": 0.0}, bits=16)
+        paths["bias"].append(p)
+    return {"paths": paths, "scene": scene}
