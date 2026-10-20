@@ -163,3 +163,13 @@ def test_derotation_undoes_jupiter_rotation():
     before = np.mean(np.abs(t1 - t0)[inner])
     after = np.mean(np.abs(back - t0)[inner])
     assert after < before * 0.5
+
+
+def test_lunar_surface_frames_are_not_flagged_as_edge():
+    from astroflow.sim.scenes import PlanetScene, Turbulence, sensor_readout
+    truth = PlanetScene("moon", (200, 260), 0).render(0)
+    tb = Turbulence((200, 260), 1.0, 1)
+    rng = np.random.default_rng(0)
+    frames = [sensor_readout(tb.apply(truth)[0], 12, 1.0, "RGGB", rng=rng) for _ in range(30)]
+    rep = quality.analyze(MemSource(frames), "planetary")
+    assert len(quality.select_frames(rep, "percent", 50)) == 15

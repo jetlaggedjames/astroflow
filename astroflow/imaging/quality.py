@@ -198,6 +198,8 @@ def _finish(src: FrameSource, kind: str, idx: list[int], results: dict[int, dict
         b = arr["brightness"]
         bz = _robust_z(b)
         area_med = np.nanmedian(arr["area"])
+        # Lunar/solar surface filling the frame: "edge"/"partial" checks don't apply.
+        surface = area_med > 0.5 * src.width * src.height
         cxm, cym = np.nanmedian(arr["cx"]), np.nanmedian(arr["cy"])
         drift = np.hypot(arr["cx"] - cxm, arr["cy"] - cym)
         for k in range(nfr):
@@ -205,9 +207,9 @@ def _finish(src: FrameSource, kind: str, idx: list[int], results: dict[int, dict
                 flags[k].append("cloud")
             if arr["clipped"][k] > 0.002:
                 flags[k].append("clipped")
-            if arr["area"][k] < 0.5 * area_med:
+            if not surface and arr["area"][k] < 0.5 * area_med:
                 flags[k].append("partial")
-            if _near_edge(arr["cx"][k], arr["cy"][k], arr["area"][k], src.width, src.height):
+            if not surface and _near_edge(arr["cx"][k], arr["cy"][k], arr["area"][k], src.width, src.height):
                 flags[k].append("edge")
             if math.isnan(q[k]):
                 flags[k].append("unreadable")
