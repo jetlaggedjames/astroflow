@@ -206,7 +206,10 @@ export async function runWizard() {
       p.append(h("h3", {}, "What do you mostly photograph?"),
         opt("planetary", "Planets and the Moon", "Short-exposure videos, lucky imaging and wavelet sharpening are front and centre. Capture opens first."),
         opt("deepsky", "Deep sky (galaxies, nebulae, clusters)", "Longer exposures, live stacking, calibration frames and plate solving are front and centre. The Mount tab opens first."),
-        opt("both", "Both", "Everything, with planetary defaults where it matters."));
+        opt("both", "Both", "Everything, with planetary defaults where it matters."),
+        h("div", { class: "okbox tiny" }, h("b", {}, "Object catalogues are already included and work offline: "),
+          "Messier, Caldwell, NGC and IC (13,372 galaxies, nebulae and clusters with common names), 83,479 stars to magnitude 9 with 431 star names, ",
+          "plus the planets and the Moon computed for any date. Nothing to download."));
     },
     async (p) => { p.append(h("h3", {}, "Camera driver"), await cameraPanel()); },
     (p, w) => {
