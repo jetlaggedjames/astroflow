@@ -157,9 +157,10 @@ class CaptureManager:
         if kind == "simulator":
             from .camera.simulator import SimCamera
             from .mount.controller import controller
-            link = None
-            if controller.sim_server is not None:
-                link = controller.sim_server.true_altaz
+            # Looked up on every frame, so the simulated sky follows the simulated mount even if it connects later.
+            def link():
+                srv = controller.sim_server
+                return srv.true_altaz() if srv is not None else None
             lat = s.get("location.lat") or 40.0
             lon = s.get("location.lon") or -75.0
             cam = SimCamera(kw.get("scene", s.get("camera.sim_scene", "jupiter")), link, float(lat), float(lon))
@@ -410,13 +411,16 @@ class CaptureManager:
         H, W = img.shape[:2]
         if W > max_w:
             img = cv2.resize(img, (max_w, int(H * max_w / W)), interpolation=cv2.INTER_AREA)
-        if stretch == "auto":
+        if stretch in ("auto", "strong"):
             lo = float(np.percentile(img, 1))
             hi = float(np.percentile(img, 99.95))
             img = np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1)
             med = float(np.median(img))
-            if med < 0.15:  # faint deep-sky frame: lift the midtones
-                m = med / 0.2
+            goal = 0.3 if stretch == "strong" else 0.2
+            # Lift the midtones only for faint deep-sky exposures; planet videos are shown linearly
+            # (lifting their dark background just magnifies noise and burns out the planet).
+            if (stretch == "strong" and med < goal) or (stretch == "auto" and self.mode == "exposures" and med < 0.15):
+                m = med / goal
                 img = ((m - 1) * img) / ((2 * m - 1) * img - m + 1e-9)
                 img = np.clip(np.nan_to_num(img), 0, 1)
         elif stretch == "gamma":
@@ -460,6 +464,12 @@ class CaptureManager:
             "OBSERVER": s.get("observer", ""), "SWCREATE": SOFTWARE_ID,
             "DATE-OBS": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
         }
+        if cam is not None and hasattr(cam, "sky_scale") and getattr(cam, "scene_name", "") == "deepsky":
+            # The simulator renders the sky as a wide field (like a camera lens); describe the optics it really
+            # simulates, so plate solving and pixel-scale based tools work on recorded practice files.
+            sky = cam.sky_scale or 10.5 * 3856 / max(roi.get("out_w") or 3856, 1) / max(roi.get("bin", 1), 1)
+            meta.update({"FOCALLEN": round(206.265 * cam.info.pixel_um / sky, 2), "TELESCOP": "Simulated wide-field lens",
+                         "NOTES": "AstroFlow simulator"})
         try:
             from .mount.controller import controller
             ms = controller.mount.status() if controller.mount and controller.mount.connected else None

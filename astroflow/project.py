@@ -67,7 +67,7 @@ def save(proj: dict) -> dict:
             except OSError:
                 pass
         atomic_write_text(p, json.dumps(proj, indent=1, default=str))
-        settings().set("last_project", str(p))
+        settings().set("last_project", proj["id"])
         return proj
 
 
@@ -130,6 +130,9 @@ def commit_process(proj: dict, steps: list[dict], masks: dict, label: str) -> di
     hist = pr.setdefault("history", [])
     idx = pr.get("index", len(hist) - 1)
     hist = hist[: idx + 1]
+    if not hist:
+        # The unedited image is the first history entry, so the very first edit can be undone too.
+        hist.append({"label": "Original (no edits)", "time": _now(), "steps": [], "masks": {}})
     if hist and hist[-1]["steps"] == steps and hist[-1].get("masks") == masks:
         return proj
     hist.append({"label": label, "time": _now(), "steps": copy.deepcopy(steps), "masks": copy.deepcopy(masks)})

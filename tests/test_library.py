@@ -153,7 +153,13 @@ def test_project_history_and_recovery():
     assert p["process"]["steps"][0]["params"]["gamma"] == 1.5
     project.undo(p)
     project.commit_process(p, [{"op": "levels", "params": {}}], {}, "levels")   # drops the redo branch
-    assert len(p["process"]["history"]) == 2
+    assert [h["label"] for h in p["process"]["history"]] == ["Original (no edits)", "gamma", "levels"]
+    # Even the very first edit can be undone, back to the untouched image.
+    project.undo(p)
+    project.undo(p)
+    assert p["process"]["steps"] == []
+    project.redo(p)
+    project.redo(p)
     loaded = project.load(p["id"])
     assert loaded["process"]["steps"][0]["op"] == "levels"
     # A corrupted save falls back to the previous version.

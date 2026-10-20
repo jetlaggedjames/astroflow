@@ -504,11 +504,21 @@ def preview_image(path: str, max_size: int = 1600, frame: int | None = None, str
     if f < 1:
         img = cv2.resize(img, (max(1, int(W * f)), max(1, int(H * f))), interpolation=cv2.INTER_AREA)
     if stretch and k not in ("png", "jpg", "webp", "bmp"):
-        from ..process.ops import Ctx, run_op
-        med = float(np.median(img))
-        if med < 0.25:
-            img = run_op("auto_stretch", img, {"target": 0.2}, Ctx())
-        else:
-            lo, hi = np.percentile(img, [0.5, 99.8])
-            img = np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1)
+        img = display_stretch(img)
     return (np.clip(img, 0, 1) * 255).astype(np.uint8)
+
+
+def display_stretch(img):
+    """Screen-friendly brightness for linear data, without changing the file.
+
+    Planets and the Moon (a bright object covering a fair part of the frame) are shown linearly;
+    faint deep-sky data (a dark sky with small stars) gets a non-linear stretch so it becomes visible.
+    """
+    import numpy as np
+    lo, hi = (float(v) for v in np.percentile(img, [0.5, 99.9]))
+    lin = np.clip((img - lo) / max(hi - lo, 1e-6), 0, 1)
+    bright_fraction = float(np.count_nonzero(lin.mean(axis=2) > 0.3)) / max(lin.shape[0] * lin.shape[1], 1)
+    if bright_fraction > 0.02 or float(np.median(lin)) > 0.25:
+        return lin
+    from ..process.ops import Ctx, run_op
+    return run_op("auto_stretch", img, {"target": 0.2}, Ctx())

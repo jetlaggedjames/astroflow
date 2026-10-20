@@ -297,6 +297,8 @@ def export_image(img: np.ndarray, out_path: str | Path, opts: dict, meta: dict |
     data = np.clip(np.nan_to_num(img.astype(np.float32)), 0, 1)
     H, W = data.shape[:2]
     tw, th, fit, dpi = target_size(W, H, opts)
+    if not dpi and opts.get("dpi"):
+        dpi = int(opts["dpi"])
     sx, sy = tw / W, th / H
     data = resize_to(data, tw, th, fit)
     if fmt == "fits":

@@ -211,7 +211,8 @@ class SimCamera(Camera):
         defocus = abs(self._ctl["sim_focus"]) * 0.15
         if defocus > 0.05:
             frame = cv2.GaussianBlur(frame, (0, 0), defocus)
-        return frame * self._brightness(exp_s)
+        # The Moon's surface is several times brighter than Jupiter's (closer to the Sun), so it needs shorter exposures.
+        return frame * self._brightness(exp_s) * (5.0 if self.scene_name == "moon" else 1.0)
 
     def _render_star(self, H: int, W: int, exp_s: float) -> np.ndarray:
         img = np.zeros((H, W, 3), np.float32)

@@ -29,6 +29,27 @@ def _process_memory() -> int:
         return 0
 
 
+def plain(v: Any) -> Any:
+    """Convert numpy numbers/arrays (and tuples, paths) inside a task result to plain JSON-friendly values."""
+    if isinstance(v, dict):
+        return {str(k): plain(x) for k, x in v.items()}
+    if isinstance(v, (list, tuple, set)):
+        return [plain(x) for x in v]
+    if isinstance(v, float):
+        return v if v == v and v not in (float("inf"), float("-inf")) else None   # JSON has no NaN/inf
+    if isinstance(v, (str, int, bool)) or v is None:
+        return v
+    try:
+        import numpy as np
+        if isinstance(v, np.ndarray):
+            return plain(v.tolist()) if v.size <= 100_000 else f"<array {v.shape}>"
+        if isinstance(v, np.generic):
+            return plain(v.item())
+    except ImportError:
+        pass
+    return str(v)
+
+
 class Job:
     def __init__(self, kind: str, title: str):
         self.id = uuid.uuid4().hex[:12]
@@ -120,7 +141,7 @@ class JobManager:
                 job.status = "running"
                 job.started = time.time()
                 log.info("Job %s started: %s", job.id, title)
-                job.result = fn(job, *args, **kwargs)
+                job.result = plain(fn(job, *args, **kwargs))
                 job.progress = 1.0
                 job.status = "done"
                 log.info("Job %s finished in %.1fs", job.id, time.time() - job.started)

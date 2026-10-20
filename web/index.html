@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en" data-theme="dark" data-mode="beginner">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AstroFlow</title>
+  <link rel="icon" href="img/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand" title="AstroFlow - capture, analyse, stack, process, export">
+      <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="14" fill="none" stroke="currentColor" stroke-width="2"/>
+        <ellipse cx="16" cy="16" rx="14" ry="5" fill="none" stroke="var(--accent)" stroke-width="2" transform="rotate(-25 16 16)"/>
+        <circle cx="16" cy="16" r="5" fill="var(--accent)"/></svg>
+      AstroFlow
+    </div>
+    <nav class="tabs" id="tabs" role="tablist"></nav>
+    <div class="top-right">
+      <div class="seg" id="modeSeg" title="Beginner shows fewer controls and step-by-step hints. Advanced shows every setting. Switching never loses work.">
+        <button data-mode="beginner">Beginner</button><button data-mode="advanced">Advanced</button>
+      </div>
+      <div class="seg" id="themeSeg" title="Night = red display to keep your night vision. Day = high contrast for sunlight.">
+        <button data-theme="night">Night</button><button data-theme="dark">Dark</button><button data-theme="day">Day</button>
+      </div>
+      <div style="position:relative">
+        <button id="jobsBtn" class="ghost" title="Background tasks">Tasks<span class="badge" id="jobsBadge" hidden>0</span></button>
+        <div class="jobs-pop" id="jobsPop"></div>
+      </div>
+      <button id="helpBtn" class="ghost icon" title="Help and keyboard shortcuts (?)">?</button>
+      <button id="stopBtn" title="Stop all mount motion immediately (Esc)">STOP</button>
+    </div>
+  </header>
+  <main id="main"></main>
+  <footer class="status">
+    <span id="stProject">No project open</span>
+    <span class="grow" id="stMsg"></span>
+    <span id="stMem"></span>
+    <span id="stGpu"></span>
+    <span id="stWhere"></span>
+  </footer>
+  <div id="toasts"></div>
+  <div class="drop-hint" id="dropHint">Drop files to add them to AstroFlow</div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
