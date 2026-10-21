@@ -97,7 +97,7 @@ if (-not (Test-Path $PyExe)) {
 
 # --------------------------------------------------------------- 3. packages
 Say "Installing the packages AstroFlow uses (a few minutes - about 400 MB)"
-& $PyExe -m pip install --upgrade --no-warn-script-location --disable-pip-version-check -r (Join-Path $Destination "requirements.txt")
+& $PyExe -m pip install --upgrade --only-binary=:all: --no-warn-script-location --disable-pip-version-check -r (Join-Path $Destination "requirements.txt")
 if ($LASTEXITCODE -ne 0) { Fail "Installing packages failed - see the messages above. Run the installer again to retry." }
 if ($WithGpu) {
     Say "Installing GPU acceleration (NVIDIA CUDA 12, about 1 GB)"
