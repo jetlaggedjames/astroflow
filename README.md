@@ -58,7 +58,7 @@ learn the whole workflow at your desk.
 ### The simple way
 
 1. Copy the AstroFlow folder to your PC (for example to your Desktop) and open it.
-2. Double-click **`Install AstroFlow.bat`**.
+2. Double-click **`Start AstroFlow.bat`** (it installs AstroFlow the first time, then just starts it - use it every time). `Install AstroFlow.bat` does only the installation.
    A black window opens and shows progress. It downloads Python (from python.org) and the open-source
    packages AstroFlow uses into AstroFlow's own folder — it does not change anything else on your PC and
    needs no administrator rights. This takes a few minutes.
